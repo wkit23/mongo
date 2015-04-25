@@ -45,12 +45,13 @@
 #include "mongo/platform/random.h"
 #include "mongo/s/balancer_policy.h"
 #include "mongo/s/catalog/catalog_manager.h"
+#include "mongo/s/catalog/type_collection.h"
+#include "mongo/s/catalog/type_settings.h"
 #include "mongo/s/chunk_manager.h"
 #include "mongo/s/config.h"
 #include "mongo/s/config_server_checker_service.h"
 #include "mongo/s/cursors.h"
 #include "mongo/s/grid.h"
-#include "mongo/s/type_settings.h"
 #include "mongo/util/concurrency/ticketholder.h"
 #include "mongo/util/log.h"
 
@@ -584,8 +585,17 @@ namespace {
                 _dataWritten = 0;
             }
 
-            const bool shouldBalance = grid.getConfigShouldBalance() &&
-                    grid.getCollShouldBalance(_manager->getns());
+            bool shouldBalance = grid.getConfigShouldBalance();
+            if (shouldBalance) {
+                auto status = grid.catalogManager()->getCollection(_manager->getns());
+                if (!status.isOK()) {
+                    log() << "Auto-split for " << _manager->getns()
+                          << " failed to load collection metadata due to " << status.getStatus();
+                    return false;
+                }
+
+                shouldBalance = status.getValue().getAllowBalance();
+            }
 
             log() << "autosplitted " << _manager->getns()
                   << " shard: " << toString()
@@ -720,20 +730,19 @@ namespace {
     }
 
     void Chunk::refreshChunkSize() {
-        BSONObj o = grid.getConfigSetting("chunksize");
-
-        if ( o.isEmpty() ) {
-           return;
-        }
-
-        int csize = o[SettingsType::chunksize()].numberInt();
-
-        // validate chunksize before proceeding
-        if ( csize == 0 ) {
-            // setting was not modified; mark as such
-            log() << "warning: invalid chunksize (" << csize << ") ignored";
+        auto chunkSizeSettingsResult =
+            grid.catalogManager()->getGlobalSettings(SettingsType::ChunkSizeDocKey);
+        if (!chunkSizeSettingsResult.isOK()) {
+            log() << chunkSizeSettingsResult.getStatus();
             return;
         }
+        SettingsType chunkSizeSettings = chunkSizeSettingsResult.getValue();
+        string errMsg;
+        if (!chunkSizeSettings.isValid(&errMsg)) {
+            log() << errMsg;
+            return;
+        }
+        int csize = chunkSizeSettings.getChunksize();
 
         LOG(1) << "Refreshing MaxChunkSize: " << csize << "MB";
 

@@ -43,7 +43,9 @@
 #include "mongo/db/write_concern.h"
 #include "mongo/s/catalog/catalog_cache.h"
 #include "mongo/s/catalog/catalog_manager.h"
+#include "mongo/s/catalog/type_collection.h"
 #include "mongo/s/catalog/type_chunk.h"
+#include "mongo/s/catalog/type_settings.h"
 #include "mongo/s/catalog/type_shard.h"
 #include "mongo/s/chunk_manager.h"
 #include "mongo/s/chunk_version.h"
@@ -51,11 +53,9 @@
 #include "mongo/s/cluster_write.h"
 #include "mongo/s/grid.h"
 #include "mongo/s/server.h"
-#include "mongo/s/type_collection.h"
 #include "mongo/s/type_database.h"
 #include "mongo/s/type_locks.h"
 #include "mongo/s/type_lockpings.h"
-#include "mongo/s/type_settings.h"
 #include "mongo/s/type_tags.h"
 #include "mongo/util/exit.h"
 #include "mongo/util/log.h"
@@ -76,14 +76,10 @@ namespace mongo {
     Shard Shard::EMPTY;
 
 
-    CollectionInfo::CollectionInfo(const BSONObj& in) {
-        _dirty = false;
-        _dropped = in[CollectionType::dropped()].trueValue();
+    CollectionInfo::CollectionInfo(const CollectionType& coll) {
+        _dropped = coll.getDropped();
 
-        if (in[CollectionType::keyPattern()].isABSONObj()) {
-            shard(new ChunkManager(in));
-        }
-
+        shard(new ChunkManager(coll));
         _dirty = false;
     }
 
@@ -133,33 +129,24 @@ namespace mongo {
     }
 
     void CollectionInfo::save(const string& ns) {
-        BSONObj key = BSON( "_id" << ns );
+        CollectionType coll;
+        coll.setNs(ns);
 
-        BSONObjBuilder val;
-        val.append(CollectionType::ns(), ns);
-        val.appendDate(CollectionType::DEPRECATED_lastmod(), jsTime());
-        val.appendBool(CollectionType::dropped(), _dropped);
-        if ( _cm ) {
-            // This also appends the lastmodEpoch.
-            _cm->getInfo( val );
+        if (_cm) {
+            invariant(!_dropped);
+            coll.setEpoch(_cm->getVersion().epoch());
+            coll.setUpdatedAt(_cm->getVersion().toLong());
+            coll.setKeyPattern(_cm->getShardKeyPattern().toBSON());
+            coll.setUnique(_cm->isUnique());
         }
         else {
-            // lastmodEpoch is a required field so we also need to do it here.
-            val.append(CollectionType::DEPRECATED_lastmodEpoch(), ChunkVersion::DROPPED().epoch());
+            invariant(_dropped);
+            coll.setDropped(true);
+            coll.setEpoch(ChunkVersion::DROPPED().epoch());
+            coll.setUpdatedAt(jsTime());
         }
 
-        Status result = grid.catalogManager()->update(CollectionType::ConfigNS,
-                                                      key,
-                                                      val.obj(),
-                                                      true,     // upsert
-                                                      false,    // multi
-                                                      NULL);
-        if (!result.isOK()) {
-            uasserted(13473,
-                      str::stream() << "failed to save collection (" << ns << "): "
-                                    << result.reason());
-        }
-
+        uassertStatusOK(grid.catalogManager()->updateCollection(ns, coll));
         _dirty = false;
     }
 
@@ -471,43 +458,25 @@ namespace mongo {
         _shardingEnabled = dbt.getSharded();
 
         // Load all collections
-        BSONObjBuilder b;
-        b.appendRegex(CollectionType::ns(),
-                      (string)"^" + pcrecpp::RE::QuoteMeta( _name ) + "\\." );
+        vector<CollectionType> collections;
+        uassertStatusOK(grid.catalogManager()->getCollections(&_name, &collections));
 
         int numCollsErased = 0;
         int numCollsSharded = 0;
 
-        ScopedDbConnection conn(configServer.modelServer(), 30.0);
-        auto_ptr<DBClientCursor> cursor = conn->query(CollectionType::ConfigNS, b.obj());
-        verify( cursor.get() );
-        while ( cursor->more() ) {
-
-            BSONObj collObj = cursor->next();
-            string collName = collObj[CollectionType::ns()].String();
-
-            if( collObj[CollectionType::dropped()].trueValue() ){
-                _collections.erase( collName );
+        for (const auto& coll : collections) {
+            if (coll.getDropped()) {
+                _collections.erase(coll.getNs());
                 numCollsErased++;
             }
-            else if( !collObj[CollectionType::primary()].eoo() ){
-                // For future compatibility, explicitly ignore any collection with the
-                // "primary" field set.
-
-                // Erased in case it was previously sharded, dropped, then init'd as unsharded
-                _collections.erase( collName );
-                numCollsErased++;
-            }
-            else{
-                _collections[ collName ] = CollectionInfo( collObj );
-                if( _collections[ collName ].isSharded() ) numCollsSharded++;
+            else {
+                _collections[coll.getNs()] = CollectionInfo(coll);
+                numCollsSharded++;
             }
         }
 
-        LOG(2) << "found " << numCollsErased << " dropped collections and "
-               << numCollsSharded << " sharded collections for database " << _name << endl;
-
-        conn.done();
+        LOG(2) << "found " << numCollsSharded << " collections left and "
+                           << numCollsErased << " collections dropped for database " << _name;
 
         return true;
     }
@@ -700,7 +669,7 @@ namespace mongo {
     }
 
     ConnectionString ConfigServer::getConnectionString() const {
-        return ConnectionString(_primary.getConnString(), ConnectionString::SYNC);
+        return _primary.getAddress();
     }
 
     bool ConfigServer::init( const ConnectionString& configCS ) {
@@ -748,17 +717,14 @@ namespace mongo {
             return false;
         }
 
-        string fullString;
-        joinStringDelim(configHosts, &fullString, ',');
-
         // This should be the first time we are trying to set up the primary shard (i.e. init
         // should be called only once)
         invariant(_primary == Shard::EMPTY);
-        _primary = Shard("config", ConnectionString(fullString, ConnectionString::SYNC), 0, false);
+        _primary = Shard("config", configCS, 0, false);
 
         Shard::installShard("config", _primary);
 
-        LOG(1) << " config string : " << fullString;
+        LOG(1) << " config string : " << configCS.toString();
 
         return true;
     }

@@ -1,5 +1,5 @@
 /**
- *    Copyright (C) 2014 MongoDB Inc.
+ *    Copyright (C) 2015 MongoDB Inc.
  *
  *    This program is free software: you can redistribute it and/or  modify
  *    it under the terms of the GNU Affero General Public License, version 3,
@@ -26,49 +26,52 @@
  *    it in the license file.
  */
 
-#include "mongo/platform/basic.h"
+#pragma once
 
-#include "mongo/util/net/get_status_from_command_result.h"
+#include <string>
 
 #include "mongo/base/status.h"
-#include "mongo/db/jsobj.h"
-#include "mongo/util/mongoutils/str.h"
 
 namespace mongo {
 
-    Status getStatusFromCommandResult(const BSONObj& result) {
-        BSONElement okElement = result["ok"];
-        BSONElement codeElement = result["code"];
-        BSONElement errmsgElement = result["errmsg"];
-        if (okElement.eoo()) {
-            return Status(ErrorCodes::CommandResultSchemaViolation,
-                          mongoutils::str::stream() << "No \"ok\" field in command result " <<
-                          result);
-        }
-        if (okElement.trueValue()) {
-            return Status::OK();
-        }
-        int code = codeElement.numberInt();
-        if (0 == code) {
-            code = ErrorCodes::UnknownError;
-        }
-        std::string errmsg;
-        if (errmsgElement.type() == String) {
-            errmsg = errmsgElement.String();
-        }
-        else if (!errmsgElement.eoo()) {
-            errmsg = errmsgElement.toString();
-        }
+    class BSONObj;
+    class BSONObjBuilder;
 
-        // we can't use startsWith(errmsg, "no such")
-        // as we have errors such as "no such collection"
-        if (code == ErrorCodes::UnknownError &&
-            (str::startsWith(errmsg, "no such cmd") ||
-             str::startsWith(errmsg, "no such command"))) {
-            code = ErrorCodes::CommandNotFound;
-        }
+namespace repl {
 
-        return Status(ErrorCodes::Error(code), errmsg);
-    }
+    class ReplSetDeclareElectionWinnerArgs {
+    public:
+        Status initialize(const BSONObj& argsObj);
 
-}  // namespace mongo
+        long long getTerm() const;
+        long long getWinnerId() const;
+        long long getConfigVersion() const;
+
+        void addToBSON(BSONObjBuilder* builder) const;
+
+    private:
+        long long _term = -1; // The term for which the winner is being declared.
+        long long _winnerId = -1; // replSet id of the member who was the winner.
+        long long _configVersion = -1; // replSet config version known to the command issuer.
+    };
+
+    class ReplSetDeclareElectionWinnerResponse {
+    public:
+        Status initialize(const BSONObj& argsObj);
+        
+        bool getOk() const;
+        long long getTerm() const;
+        long long getErrorCode() const;
+        const std::string& getErrorMsg() const;
+
+        void addToBSON(BSONObjBuilder* builder) const;
+
+    private:
+        bool _ok = false;
+        long long _term = -1;
+        long long _code = ErrorCodes::OK;
+        std::string _errmsg;
+    };
+
+} // namespace repl
+} // namespace mongo

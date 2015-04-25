@@ -54,8 +54,12 @@ namespace repl {
     class HandshakeArgs;
     class IsMasterResponse;
     class OplogReader;
+    class ReplSetDeclareElectionWinnerArgs;
+    class ReplSetDeclareElectionWinnerResponse;
     class ReplSetHeartbeatArgs;
+    class ReplSetHeartbeatArgsV1;
     class ReplSetHeartbeatResponse;
+    class ReplSetHeartbeatResponseV1;
     class ReplSetRequestVotesArgs;
     class ReplSetRequestVotesResponse;
     class ReplicaSetConfig;
@@ -76,7 +80,7 @@ namespace repl {
      * with the rest of the system.  The public methods on ReplicationCoordinator are the public
      * API that the replication subsystem presents to the rest of the codebase.
      */
-    class ReplicationCoordinator : ReplicationProgressManager {
+    class ReplicationCoordinator : public ReplicationProgressManager {
         MONGO_DISALLOW_COPYING(ReplicationCoordinator);
 
     public:
@@ -401,6 +405,8 @@ namespace repl {
          */
         virtual Status processHeartbeat(const ReplSetHeartbeatArgs& args,
                                         ReplSetHeartbeatResponse* response) = 0;
+        virtual Status processHeartbeatV1(const ReplSetHeartbeatArgsV1& args,
+                                          ReplSetHeartbeatResponseV1* response) = 0;
 
         /**
          * Arguments for the replSetReconfig command.
@@ -565,6 +571,24 @@ namespace repl {
         */
         virtual Status processReplSetRequestVotes(const ReplSetRequestVotesArgs& args,
                                                   ReplSetRequestVotesResponse* response) = 0;
+
+        /*
+        * Handles an incoming replSetDeclareElectionWinner command.
+        * Returns a Status with either OK or an error message.
+        */
+        virtual Status processReplSetDeclareElectionWinner(
+                const ReplSetDeclareElectionWinnerArgs& args,
+                ReplSetDeclareElectionWinnerResponse* response) = 0;
+
+        /**
+         * Prepares a BSONObj describing the current term, primary, and lastOp information.
+         */
+        virtual void prepareCursorResponseInfo(BSONObjBuilder* objBuilder) = 0;
+
+        /**
+         * Returns true if the V1 election protocol is being used and false otherwise.
+         */ 
+        virtual bool isV1ElectionProtocol() = 0;
 
     protected:
 

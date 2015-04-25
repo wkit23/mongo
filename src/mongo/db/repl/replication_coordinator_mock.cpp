@@ -305,6 +305,22 @@ namespace repl {
         return Status::OK();
     }
 
+    Status ReplicationCoordinatorMock::processReplSetDeclareElectionWinner(
+            const ReplSetDeclareElectionWinnerArgs& args,
+            ReplSetDeclareElectionWinnerResponse* response) {
+        return Status::OK();
+    }
+
+    void ReplicationCoordinatorMock::prepareCursorResponseInfo(BSONObjBuilder* objBuilder) {}
+
+    Status ReplicationCoordinatorMock::processHeartbeatV1(const ReplSetHeartbeatArgsV1& args,
+                                                          ReplSetHeartbeatResponseV1* response) {
+        return Status::OK();
+    }
+
+    bool ReplicationCoordinatorMock::isV1ElectionProtocol() {
+        return true;
+    }
 
 } // namespace repl
 } // namespace mongo

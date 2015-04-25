@@ -5,8 +5,11 @@ Import("env")
 env.Library(
     target='catalog_types',
     source=[
+        'type_actionlog.cpp',
         'type_changelog.cpp',
         'type_chunk.cpp',
+        'type_collection.cpp',
+        'type_settings.cpp',
         'type_shard.cpp'
     ],
     LIBDEPS=[
@@ -28,7 +31,7 @@ env.Library(
         '$BUILD_DIR/mongo/db/common',
         '$BUILD_DIR/mongo/s/batch_write_types',
         '$BUILD_DIR/mongo/s/catalog/catalog_types'
-    ],
+    ]
 )
 
 env.CppUnitTest(
@@ -36,6 +39,8 @@ env.CppUnitTest(
     source=[
         'type_changelog_test.cpp',
         'type_chunk_test.cpp',
+        'type_collection_test.cpp',
+        'type_settings_test.cpp',
         'type_shard_test.cpp'
     ],
     LIBDEPS=[

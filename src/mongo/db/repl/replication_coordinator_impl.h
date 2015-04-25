@@ -38,6 +38,7 @@
 #include "mongo/bson/timestamp.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/repl/member_state.h"
+#include "mongo/db/repl/data_replicator.h"
 #include "mongo/db/repl/replica_set_config.h"
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/repl/replication_coordinator_external_state.h"
@@ -60,6 +61,7 @@ namespace repl {
     class HandshakeArgs;
     class HeartbeatResponseAction;
     class OplogReader;
+    class ReplSetDeclareElectionWinnerArgs;
     class ReplSetRequestVotesArgs;
     class ReplicaSetConfig;
     class SyncSourceFeedback;
@@ -76,6 +78,12 @@ namespace repl {
                                    ReplicationCoordinatorExternalState* externalState,
                                    ReplicationExecutor::NetworkInterface* network,
                                    TopologyCoordinator* topoCoord,
+                                   int64_t prngSeed);
+        // Takes ownership of the "externalState" and "topCoord" objects.
+        ReplicationCoordinatorImpl(const ReplSettings& settings,
+                                   ReplicationCoordinatorExternalState* externalState,
+                                   TopologyCoordinator* topoCoord,
+                                   ReplicationExecutor* replExec,
                                    int64_t prngSeed);
         virtual ~ReplicationCoordinatorImpl();
 
@@ -232,6 +240,17 @@ namespace repl {
         virtual Status processReplSetRequestVotes(const ReplSetRequestVotesArgs& args,
                                                   ReplSetRequestVotesResponse* response);
 
+        virtual Status processReplSetDeclareElectionWinner(
+                const ReplSetDeclareElectionWinnerArgs& args,
+                ReplSetDeclareElectionWinnerResponse* response);
+
+        virtual void prepareCursorResponseInfo(BSONObjBuilder* objBuilder);
+
+        virtual Status processHeartbeatV1(const ReplSetHeartbeatArgsV1& args,
+                                          ReplSetHeartbeatResponseV1* response);
+
+        virtual bool isV1ElectionProtocol();
+
         // ================== Test support API ===================
 
         /**
@@ -251,7 +270,12 @@ namespace repl {
         Status setLastOptime_forTest(long long cfgVer, long long memberId, const Timestamp& ts);
 
     private:
-
+        ReplicationCoordinatorImpl(const ReplSettings& settings,
+                                   ReplicationCoordinatorExternalState* externalState,
+                                   TopologyCoordinator* topCoord,
+                                   int64_t prngSeed,
+                                   ReplicationExecutor::NetworkInterface* network,
+                                   ReplicationExecutor* replExec);
         /**
          * Configuration states for a replica set node.
          *
@@ -289,7 +313,7 @@ namespace repl {
         enum PostMemberStateUpdateAction {
             kActionNone,
             kActionCloseAllConnections,  // Also indicates that we should clear sharding state.
-            kActionChooseNewSyncSource,
+            kActionFollowerModeStateChange,
             kActionWinElection
         };
 
@@ -572,12 +596,6 @@ namespace repl {
         MemberState _getMemberState_inlock() const;
 
         /**
-         * Returns the current replication mode. This method requires the caller to be holding
-         * "_mutex" to be called safely.
-         */
-        Mode _getReplicationMode_inlock() const;
-
-        /**
          * Starts loading the replication configuration from local storage, and if it is valid,
          * schedules a callback (of _finishLoadLocalConfig) to set it as the current replica set
          * config (sets _rsConfig and _thisMembersConfigIndex).
@@ -798,8 +816,11 @@ namespace repl {
         // Pointer to the TopologyCoordinator owned by this ReplicationCoordinator.
         boost::scoped_ptr<TopologyCoordinator> _topCoord;                                 // (X)
 
+        // If the executer is owned then this will be set, but should not be used.
+        // This is only used to clean up and destroy the replExec if owned
+        std::unique_ptr<ReplicationExecutor> _replExecutorIfOwned;                        // (S)
         // Executor that drives the topology coordinator.
-        ReplicationExecutor _replExecutor;                                                // (S)
+        ReplicationExecutor& _replExecutor;                                               // (S)
 
         // Pointer to the ReplicationCoordinatorExternalState owned by this ReplicationCoordinator.
         boost::scoped_ptr<ReplicationCoordinatorExternalState> _externalState;            // (PS)
@@ -891,7 +912,10 @@ namespace repl {
         AtomicUInt32 _canServeNonLocalReads;                                              // (S)
 
         // OpTime of the latest committed operation. Matches the concurrency level of _slaveInfo.
-        Timestamp _lastCommittedOpTime;                                                          // (M)
+        Timestamp _lastCommittedOpTime;                                                   // (M)
+
+        // Data Replicator used to replicate data
+        DataReplicator _dr;                                                               // (S)
     };
 
 } // namespace repl

@@ -46,19 +46,24 @@
 #include "mongo/db/server_options.h"
 #include "mongo/platform/atomic_word.h"
 #include "mongo/s/catalog/legacy/config_coordinator.h"
+#include "mongo/s/catalog/type_actionlog.h"
 #include "mongo/s/catalog/type_changelog.h"
 #include "mongo/s/catalog/type_chunk.h"
+#include "mongo/s/catalog/type_collection.h"
+#include "mongo/s/catalog/type_settings.h"
 #include "mongo/s/catalog/type_shard.h"
 #include "mongo/s/chunk_manager.h"
 #include "mongo/s/client/dbclient_multi_command.h"
 #include "mongo/s/client/shard_connection.h"
-#include "mongo/s/distlock.h"
 #include "mongo/s/client/shard.h"
 #include "mongo/s/config.h"
+#include "mongo/s/dist_lock_manager.h"
+#include "mongo/s/legacy_dist_lock_manager.h"
 #include "mongo/s/shard_key_pattern.h"
 #include "mongo/s/type_database.h"
 #include "mongo/s/write_ops/batched_command_request.h"
 #include "mongo/s/write_ops/batched_command_response.h"
+#include "mongo/stdx/memory.h"
 #include "mongo/util/mongoutils/str.h"
 #include "mongo/util/net/hostandport.h"
 #include "mongo/util/log.h"
@@ -66,6 +71,7 @@
 
 namespace mongo {
 
+    using std::auto_ptr;
     using std::map;
     using std::pair;
     using std::set;
@@ -257,6 +263,9 @@ namespace {
     // Whether the logChange call should attempt to create the changelog collection
     AtomicInt32 changeLogCollectionCreated(0);
 
+    // Whether the logAction call should attempt to create the actionlog collection
+    AtomicInt32 actionLogCollectionCreated(0);
+
 } // namespace
 
 
@@ -351,7 +360,15 @@ namespace {
             _configServers.push_back(_configServerConnectionString);
         }
 
+        _distLockManager = stdx::make_unique<LegacyDistLockManager>(_configServerConnectionString);
+        _distLockManager->startUp();
+
         return Status::OK();
+    }
+
+    void CatalogManagerLegacy::shutDown() {
+        invariant(_distLockManager);
+        _distLockManager->shutDown();
     }
 
     Status CatalogManagerLegacy::enableSharding(const std::string& dbName) {
@@ -491,8 +508,17 @@ namespace {
         invariant(dbName != "admin");
         invariant(dbName != "config");
 
+        // Lock the database globally to prevent conflicts with simultaneous database creation.
+        auto scopedDistLock = getDistLockManager()->lock(dbName,
+                                                         "createDatabase",
+                                                         stdx::chrono::milliseconds(1000),
+                                                         stdx::chrono::milliseconds(500));
+        if (!scopedDistLock.isOK()) {
+            return scopedDistLock.getStatus();
+        }
+
         // Check for case sensitivity violations
-        Status status = _checkDbDoesNotExist(dbName);
+        auto status = _checkDbDoesNotExist(dbName);
         if (!status.isOK()) {
             return status;
         }
@@ -744,8 +770,8 @@ namespace {
                                &response);
         if (!status.isOK()) {
             return Status(status.code(),
-                            str::stream() << "database metadata write failed: "
-                                          << response.toBSON());
+                          str::stream() << "database metadata write failed: "
+                                        << response.toBSON() << "; status: " << status.toString());
         }
 
         return Status::OK();
@@ -773,19 +799,82 @@ namespace {
                           stream() <<  "database " << dbName << " not found");
         }
 
+        conn.done();
         return DatabaseType::fromBSON(dbObj);
+    }
+
+    Status CatalogManagerLegacy::updateCollection(const std::string& collNs,
+                                                  const CollectionType& coll) {
+        fassert(28634, coll.validate());
+
+        BatchedCommandResponse response;
+        Status status = update(CollectionType::ConfigNS,
+                               BSON(CollectionType::fullNs(collNs)),
+                               coll.toBSON(),
+                               true,    // upsert
+                               false,   // multi
+                               NULL);
+        if (!status.isOK()) {
+            return Status(status.code(),
+                          str::stream() << "collection metadata write failed: "
+                                        << response.toBSON() << "; status: " << status.toString());
+        }
+
+        return Status::OK();
+    }
+
+    StatusWith<CollectionType> CatalogManagerLegacy::getCollection(const std::string& collNs) {
+        ScopedDbConnection conn(_configServerConnectionString, 30.0);
+
+        BSONObj collObj = conn->findOne(CollectionType::ConfigNS,
+                                        BSON(CollectionType::fullNs(collNs)));
+        if (collObj.isEmpty()) {
+            conn.done();
+            return Status(ErrorCodes::NamespaceNotFound,
+                          stream() << "collection " << collNs << " not found");
+        }
+
+        conn.done();
+        return CollectionType::fromBSON(collObj);
+    }
+
+    Status CatalogManagerLegacy::getCollections(const std::string* dbName,
+                                                std::vector<CollectionType>* collections) {
+        collections->empty();
+
+        BSONObjBuilder b;
+        if (dbName) {
+            invariant(!dbName->empty());
+            b.appendRegex(CollectionType::fullNs(),
+                          (string)"^" + pcrecpp::RE::QuoteMeta(*dbName) + "\\.");
+        }
+
+        ScopedDbConnection conn(_configServerConnectionString, 30.0);
+
+        auto_ptr<DBClientCursor> cursor = conn->query(CollectionType::ConfigNS, b.obj());
+        while (cursor->more()) {
+            const BSONObj collObj = cursor->next();
+
+            auto status = CollectionType::fromBSON(collObj);
+            if (!status.isOK()) {
+                conn.done();
+                return status.getStatus();
+            }
+
+            collections->push_back(status.getValue());
+        }
+
+        conn.done();
+        return Status::OK();
     }
 
     Status CatalogManagerLegacy::dropCollection(const std::string& collectionNs) {
         logChange(NULL, "dropCollection.start", collectionNs, BSONObj());
 
         // Lock the collection globally so that split/migrate cannot run
-        ScopedDistributedLock nsLock(_configServerConnectionString, collectionNs);
-        nsLock.setLockMessage("drop");
-
-        Status lockStatus = nsLock.tryAcquire();
-        if (!lockStatus.isOK()) {
-            return lockStatus;
+        auto scopedDistLock = getDistLockManager()->lock(collectionNs, "drop");
+        if (!scopedDistLock.isOK()) {
+            return scopedDistLock.getStatus();
         }
 
         LOG(1) << "dropCollection " << collectionNs << " started";
@@ -884,6 +973,29 @@ namespace {
         return Status::OK();
     }
 
+    void CatalogManagerLegacy::logAction(const ActionLogType& actionLog) {
+        // Create the action log collection and ensure that it is capped. Wrap in try/catch,
+        // because creating an existing collection throws.
+        if (actionLogCollectionCreated.load() == 0) {
+            try {
+                ScopedDbConnection conn(_configServerConnectionString, 30.0);
+                conn->createCollection(ActionLogType::ConfigNS, 1024 * 1024 * 2, true);
+                conn.done();
+
+                actionLogCollectionCreated.store(1);
+            }
+            catch (const DBException& e) {
+                // It's ok to ignore this exception
+                LOG(1) << "couldn't create actionlog collection: " << e;
+            }
+        }
+
+        Status result = insert(ActionLogType::ConfigNS, actionLog.toBSON(), NULL);
+        if (!result.isOK()) {
+            log() << "error encountered while logging action: " << result;
+        }
+    }
+
     void CatalogManagerLegacy::logChange(OperationContext* opCtx,
                                          const string& what,
                                          const string& ns,
@@ -943,6 +1055,32 @@ namespace {
         }
     }
 
+    StatusWith<SettingsType> CatalogManagerLegacy::getGlobalSettings(const string& key) {
+        SettingsType settingsType;
+
+        try {
+            ScopedDbConnection conn(_configServerConnectionString, 30);
+            BSONObj settingsDoc = conn->findOne(SettingsType::ConfigNS,
+                                                BSON(SettingsType::key(key)));
+
+            string errMsg;
+            if (!settingsType.parseBSON(settingsDoc, &errMsg)) {
+                conn.done();
+                return Status(ErrorCodes::UnsupportedFormat,
+                              str::stream() << "error parsing config.settings document: "
+                                            << errMsg);
+            }
+            conn.done();
+        }
+        catch (const DBException& ex) {
+            return Status(ErrorCodes::OperationFailed,
+                          str::stream() << "unable to successfully obtain config.settings document: "
+                                        << causedBy(ex));
+        }
+
+        return settingsType;
+    }
+
     void CatalogManagerLegacy::getDatabasesForShard(const string& shardName,
                                                     vector<string>* dbs) {
         ScopedDbConnection conn(_configServerConnectionString, 30.0);
@@ -987,6 +1125,7 @@ namespace {
 
             StatusWith<ShardType> shardRes = ShardType::fromBSON(shardObj);
             if (!shardRes.isOK()) {
+                conn.done();
                 return Status(ErrorCodes::FailedToParse,
                               str::stream() << "Failed to parse chunk BSONObj: "
                                             << shardRes.getStatus().reason());
@@ -1021,6 +1160,7 @@ namespace {
         catch (const DBException& ex) {
             return ex.toStatus();
         }
+
         if (!ok) {
             string errMsg(str::stream() << "Unable to save chunk ops. Command: "
                                         << cmd << ". Result: " << cmdResult);
@@ -1134,6 +1274,11 @@ namespace {
         conn.done();
 
         return shardCount;
+    }
+
+    DistLockManager* CatalogManagerLegacy::getDistLockManager() {
+        invariant(_distLockManager);
+        return _distLockManager.get();
     }
 
 } // namespace mongo

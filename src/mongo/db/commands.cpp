@@ -50,9 +50,9 @@
 #include "mongo/db/jsobj.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/server_parameters.h"
+#include "mongo/rpc/get_status_from_command_result.h"
 #include "mongo/s/write_ops/wc_error_detail.h"
 #include "mongo/util/log.h"
-#include "mongo/util/net/get_status_from_command_result.h"
 
 namespace mongo {
 
@@ -309,28 +309,6 @@ namespace mongo {
         *batchSize = batchSizeElem.numberLong();
 
         return Status::OK();
-    }
-
-    void Command::appendCursorResponseObject(long long cursorId,
-                                             StringData cursorNamespace,
-                                             BSONArray firstBatch,
-                                             BSONObjBuilder* builder) {
-        BSONObjBuilder cursorObj(builder->subobjStart("cursor"));
-        cursorObj.append("id", cursorId);
-        cursorObj.append("ns", cursorNamespace);
-        cursorObj.append("firstBatch", firstBatch);
-        cursorObj.done();
-    }
-
-    void Command::appendGetMoreResponseObject(long long cursorId,
-                                              StringData cursorNamespace,
-                                              BSONArray nextBatch,
-                                              BSONObjBuilder* builder) {
-        BSONObjBuilder cursorObj(builder->subobjStart("cursor"));
-        cursorObj.append("id", cursorId);
-        cursorObj.append("ns", cursorNamespace);
-        cursorObj.append("nextBatch", nextBatch);
-        cursorObj.done();
     }
 
     Status Command::checkAuthForCommand(ClientBasic* client,

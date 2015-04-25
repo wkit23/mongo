@@ -1972,6 +1972,48 @@ def doConfigure(myenv):
         print "Invalid --allocator parameter: \"%s\"" % get_option('allocator')
         Exit(1)
 
+    def CheckStdAtomic(context, base_type, extra_message):
+        test_body = """
+        #include <atomic>
+
+        int main() {{
+            std::atomic<{0}> x;
+
+            x.store(0);
+            {0} y = 1;
+            x.fetch_add(y);
+            x.fetch_sub(y);
+            x.exchange(y);
+            x.compare_exchange_strong(y, x);
+            return x.load();
+        }}
+        """.format(base_type)
+
+        context.Message(
+            "Checking if std::atomic<{0}> works{1}... ".format(
+                base_type, extra_message
+            )
+        )
+
+        ret = context.TryLink(textwrap.dedent(test_body), ".cpp")
+        context.Result(ret)
+        return ret
+    conf.AddTest("CheckStdAtomic", CheckStdAtomic)
+
+    def check_all_atomics(extra_message=''):
+        for t in ('int64_t', 'uint64_t', 'int32_t', 'uint32_t'):
+            if not conf.CheckStdAtomic(t, extra_message):
+                return False
+        return True
+
+    if not check_all_atomics():
+        if not conf.CheckLib('atomic', symbol=None, header=None, language='C', autoadd=1):
+            print "Some atomic ops are not intrinsically supported, but no libatomic found"
+            Exit(1)
+        if not check_all_atomics(' with libatomic'):
+            print "The toolchain does not support std::atomic, cannot continue"
+            Exit(1)
+
     # ask each module to configure itself and the build environment.
     moduleconfig.configure_modules(mongo_modules, conf)
 

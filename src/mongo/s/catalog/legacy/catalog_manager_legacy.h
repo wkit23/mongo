@@ -34,6 +34,7 @@
 #include "mongo/bson/bsonobj.h"
 #include "mongo/client/dbclientinterface.h"
 #include "mongo/s/catalog/catalog_manager.h"
+#include "mongo/s/dist_lock_manager.h"
 
 namespace mongo {
 
@@ -50,6 +51,8 @@ namespace mongo {
          * server. Can only be called once for the lifetime.
          */
         Status init(const ConnectionString& configCS);
+
+        virtual void shutDown() override;
 
         virtual Status enableSharding(const std::string& dbName);
 
@@ -72,6 +75,13 @@ namespace mongo {
 
         virtual StatusWith<DatabaseType> getDatabase(const std::string& dbName);
 
+        virtual Status updateCollection(const std::string& collNs, const CollectionType& coll);
+
+        virtual StatusWith<CollectionType> getCollection(const std::string& collNs);
+
+        virtual Status getCollections(const std::string* dbName,
+                                      std::vector<CollectionType>* collections);
+
         virtual Status dropCollection(const std::string& collectionNs);
 
         virtual void getDatabasesForShard(const std::string& shardName,
@@ -89,13 +99,19 @@ namespace mongo {
         virtual Status applyChunkOpsDeprecated(const BSONArray& updateOps,
                                                const BSONArray& preCondition);
 
+        virtual void logAction(const ActionLogType& actionLog);
+
         virtual void logChange(OperationContext* txn,
                                const std::string& what,
                                const std::string& ns,
                                const BSONObj& detail);
 
+        virtual StatusWith<SettingsType> getGlobalSettings(const std::string& key);
+
         virtual void writeConfigServerDirect(const BatchedCommandRequest& request,
                                              BatchedCommandResponse* response);
+
+        virtual DistLockManager* getDistLockManager() override;
 
     private:
         /**
@@ -120,6 +136,8 @@ namespace mongo {
         // Parsed config server hosts, as specified on the command line.
         ConnectionString _configServerConnectionString;
         std::vector<ConnectionString> _configServers;
+
+        std::unique_ptr<DistLockManager> _distLockManager;
     };
 
 } // namespace mongo
