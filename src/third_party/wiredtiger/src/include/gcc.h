@@ -160,6 +160,13 @@
 #define	WT_READ_BARRIER()	WT_FULL_BARRIER()
 #define	WT_WRITE_BARRIER()	WT_FULL_BARRIER()
 
+#elif defined(__arm__)
+#define WT_FULL_BARRIER() do {						\
+	__asm__ __volatile__ ("mcr p15, 0, %0, c7, c10, 4" 		\
+	: : "r" (0) : "memory");					\
+} while(0)
+#define WT_READ_BARRIER()	WT_FULL_BARRIER()
+#define WT_WRITE_BARRIER()	WT_FULL_BARRIER()
 #else
 #error "No write barrier implementation for this hardware"
 #endif

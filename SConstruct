@@ -220,7 +220,7 @@ add_option( "disable-minimum-compiler-version-enforcement",
 add_option( "ssl" , "Enable SSL" , 0 , True )
 add_option( "ssl-fips-capability", "Enable the ability to activate FIPS 140-2 mode", 0, True );
 add_option( "wiredtiger", "Enable wiredtiger", "?", True, "wiredtiger",
-            type="choice", choices=["on", "off"], const="on", default="on")
+            type="choice", choices=["on", "off"], const="on", default="off")
 
 # library choices
 js_engine_choices = ['v8-3.12', 'v8-3.25', 'none']
@@ -679,7 +679,7 @@ processor_macros = {
     'i386': ('__i386', '_M_IX86'),
     'sparc': ('__sparc'),
     'PowerPC': ('__powerpc__', '__PPC'),
-    'arm' : ('__arm__'),
+    'arm' : ('__arm__', '__thumb__'),
     'arm64' : ('__arm64__', '__aarch64__'),
 }
 
@@ -718,7 +718,7 @@ os_macros = {
     "freebsd": "__FreeBSD__",
     "openbsd": "__OpenBSD__",
     "osx": "__APPLE__",
-    "linux": "__linux__",
+    "linux": "__gnu_linux__",
 }
 
 def CheckForOS(context, which_os):
@@ -1426,7 +1426,7 @@ def doConfigure(myenv):
         conf.Finish()
 
     if not myenv.ToolchainIs('msvc'):
-        if not AddToCXXFLAGSIfSupported(myenv, '-std=c++11'):
+        if not AddToCXXFLAGSIfSupported(myenv, '-std=gnu++11'):
             print( 'Compiler does not honor -std=c++11' )
             Exit(1)
         if not AddToCFLAGSIfSupported(myenv, '-std=c99'):
